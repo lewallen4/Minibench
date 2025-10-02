@@ -1,148 +1,178 @@
-#!/usr/bin/env bash
+#!/usr/bin/env bash  
 
-DURATION=60   # seconds to run each CPU test
-RESULT_FILE="benchmark_results.txt"
+DURATION=60   # seconds to run each CPU test  
+RESULT_FILE="benchmark_results.txt"  
 
-# ASCII Art banner
-print_banner() {
-cat << 'EOF'
-____ ____ ____     ___  ____ _  _ ____ _  _ 
-[__  |__| [__      |__] |___ |\ | |    |__| 
-___] |  | ___] ___ |__] |___ | \| |___ |  | 
-                                            
-  CPU & Memory Benchmark Script
-#################################################################
+# ASCII Art banner  
+print_banner() {  
+cat << 'EOF'  
+____ ____ ____     ___  ____ _  _ ____ _  _   
+[__  |__| [__      |__] |___ |\ | |    |__|   
+___] |  | ___] ___ |__] |___ | \| |___ |  |   
+                                              
+  CPU & Memory Benchmark Script  
+#################################################################  
 EOF
-}
+}  
 
-# System info summary
-print_system_info() {
-    echo
-    echo "############### SYSTEM INFO ###############"
-    echo "User:       $USER"
-    echo "Directory:  $(pwd)"
-    echo "Hostname:   $(hostname)"
-    echo "OS:         $(uname -s) $(uname -r) ($(uname -m))"
+# System info summary  
+print_system_info() {  
+    echo  
+    echo "############### SYSTEM INFO ###############"  
+
+    # User
+    [ -n "$USER" ] && echo "User:       $USER"
+
+    # Directory
+    if dir=$(pwd 2>/dev/null); then
+        [ -n "$dir" ] && echo "Directory:  $dir"
+    fi
+
+    # Hostname
+    if host=$(hostname 2>/dev/null); then
+        [ -n "$host" ] && echo "Hostname:   $host"
+    fi
+
+    # OS
+    os_name=$(uname -s 2>/dev/null)
+    os_version=$(uname -r 2>/dev/null)
+    arch=$(uname -m 2>/dev/null)
+    if [ -n "$os_name" ] && [ -n "$os_version" ] && [ -n "$arch" ]; then
+        echo "OS:         $os_name $os_version ($arch)"
+    fi
 
     # CPU info
-    if [ -f /proc/cpuinfo ]; then
-        local model=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //')
-        local cores=$(nproc)
-        echo "CPU:        $model ($cores cores)"
-    else
-        echo "CPU:        Unknown"
-    fi
+    if [ -f /proc/cpuinfo ]; then  
+        model=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //')  
+        cores=$(nproc 2>/dev/null)  
+        [ -n "$model" ] && [ -n "$cores" ] && echo "CPU:        $model ($cores cores)"
+    else  
+        echo "CPU:        Unknown"  
+    fi  
 
     # Memory info
-    if [ -f /proc/meminfo ]; then
-        local mem_total_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-        echo "Memory:     ${mem_total_mb} MB"
-    fi
+    if [ -f /proc/meminfo ]; then  
+        mem_total_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)  
+        [ -n "$mem_total_mb" ] && echo "Memory:     ${mem_total_mb} MB"
+    fi  
 
     # Disk info
-    local root_disk=$(df -h / | awk 'NR==2 {print $2 " total, " $3 " used, " $4 " free"}')
-    echo "Disk (/):   $root_disk"
+    if root_disk=$(df -h / 2>/dev/null | awk 'NR==2 {print $2 " total, " $3 " used, " $4 " free"}'); then
+        [ -n "$root_disk" ] && echo "Disk (/):   $root_disk"
+    fi
 
-    # Bash & uptime
-    echo "Bash:       $BASH_VERSION"
-    echo "Uptime:     $(uptime -p)"
-    echo "#################################################################"
-    echo
-}
+    # Bash version
+    [ -n "$BASH_VERSION" ] && echo "Bash:       $BASH_VERSION"
 
-cpu_worker() {
-    local start_ns=$(date +%s%N)
-    local end_ns=$((start_ns + DURATION * 1000000000))
-    local count=0
-    local x=1 y=7 z=3
+    # Uptime
+    if uptime_info=$(uptime -p 2>/dev/null); then
+        [ -n "$uptime_info" ] && echo "Uptime:     $uptime_info"
+    fi
 
-    while [ $(date +%s%N) -lt $end_ns ]; do
-        x=$(( (x * y + z) % 1000000 ))
-        count=$((count + 1))
-    done
+    echo "#################################################################"  
+    echo  
+}  
 
-    echo "$count"
-}
+cpu_worker() {  
+    local start_ns=$(date +%s%N)  
+    local end_ns=$((start_ns + DURATION * 1000000000))  
+    local count=0  
+    local x=1 y=7 z=3  
 
-cpu_single() {
-    echo "[CPU] Single-core benchmark for ${DURATION}s..."
-    local ops=$(cpu_worker)
-    local kops=$(echo "scale=2; $ops / 1000" | bc)
-    printf "[CPU] Single-core → %.2f thousand ops/sec\n" "$kops"
-    SINGLE_RESULT="$kops"
-}
+    while [ $(date +%s%N) -lt $end_ns ]; do  
+        x=$(( (x * y + z) % 1000000 ))  
+        count=$((count + 1))  
+    done  
 
-cpu_multi() {
-    local cores=$(nproc)
-    echo "[CPU] Multi-core benchmark on $cores cores for ${DURATION}s..."
+    echo "$count"  
+}  
 
-    tmpdir=$(mktemp -d)
-    declare -a files
-    for ((i=0;i<cores;i++)); do
-        files[i]="$tmpdir/worker_$i.txt"
-        cpu_worker > "${files[i]}" &
-    done
+cpu_single() {  
+    echo "[CPU] Single-core benchmark for ${DURATION}s..."  
+    local ops=$(cpu_worker)  
+    local kops=$(printf "%.2f" "$(echo "$ops / 1000" | awk '{printf "%f", $1}')")  
+    printf "[CPU] Single-core → %s thousand ops/sec\n" "$kops"  
+    SINGLE_RESULT="$kops"  
+}  
 
-    wait
+cpu_multi() {  
+    local cores=$(nproc 2>/dev/null)  
+    echo "[CPU] Multi-core benchmark on $cores cores for ${DURATION}s..."  
 
-    local total=0
-    for f in "${files[@]}"; do
-        total=$((total + $(cat "$f")))
-    done
+    tmpdir=$(mktemp -d)  
+    declare -a files  
+    for ((i=0;i<cores;i++)); do  
+        files[i]="$tmpdir/worker_$i.txt"  
+        cpu_worker > "${files[i]}" &  
+    done  
 
-    local kops=$(echo "scale=2; $total / 1000" | bc)
-    printf "[CPU] Multi-core → %.2f thousand ops/sec (all %d cores)\n" "$kops" "$cores"
-    MULTI_RESULT="$kops"
+    wait  
 
-    rm -rf "$tmpdir"
-}
+    local total=0  
+    for f in "${files[@]}"; do  
+        total=$((total + $(cat "$f")))  
+    done  
 
-mem_bench() {
-    echo "[MEM] Running benchmark for ${DURATION}s..."
-    local total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
-    local mb=$(( total_mem_mb / 2 ))
-    echo "[MEM] Using $mb MB per iteration"
+    local kops=$(printf "%.2f" "$(echo "$total / 1000" | awk '{printf "%f", $1}')")  
+    printf "[CPU] Multi-core → %s thousand ops/sec (all %d cores)\n" "$kops" "$cores"  
+    MULTI_RESULT="$kops"  
 
-    mkdir -p /dev/shm
-    local start_ns=$(date +%s%N)
-    local end_ns=$((start_ns + DURATION * 1000000000))
-    local total_bytes=0
+    rm -rf "$tmpdir"  
+}  
 
-    while [ $(date +%s%N) -lt $end_ns ]; do
-        dd if=/dev/zero of=/dev/shm/memtest bs=1M count=$mb conv=fdatasync status=none
-        total_bytes=$((total_bytes + mb * 1024 * 1024))
-    done
+mem_bench() {  
+    echo "[MEM] Running benchmark for ${DURATION}s..."  
+    if [ -f /proc/meminfo ]; then
+        local total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)  
+        local mb=$(( total_mem_mb / 2 ))  
+        echo "[MEM] Using $mb MB per iteration"  
 
-    local mbps=$(echo "scale=2; $total_bytes / 1024 / 1024 / $DURATION" | bc -l)
-    printf "[MEM] Average throughput over %d sec → %.2f MB/sec\n" "$DURATION" "$mbps"
-    MEM_RESULT="$mbps"
+        mkdir -p /dev/shm  
+        local start_ns=$(date +%s%N)  
+        local end_ns=$((start_ns + DURATION * 1000000000))  
+        local total_bytes=0  
 
-    rm -f /dev/shm/memtest
-}
+        while [ $(date +%s%N) -lt $end_ns ]; do  
+            dd if=/dev/zero of=/dev/shm/memtest bs=1M count=$mb conv=fdatasync status=none  
+            total_bytes=$((total_bytes + mb * 1024 * 1024))  
+        done  
 
-print_dashboard() {
-    echo
-    echo "############### BENCHMARK RESULTS ##########################"
-    printf "Single-core CPU: %.2f thousand ops/sec\n" "$SINGLE_RESULT"
-    printf "Multi-core CPU:  %.2f thousand ops/sec\n" "$MULTI_RESULT"
-    printf "Memory:          %.2f MB/sec\n" "$MEM_RESULT"
-    echo "#################################################################"
-}
+        local mbps=$(printf "%.2f" "$(awk "BEGIN {print $total_bytes/1024/1024/$DURATION}")")  
+        printf "[MEM] Average throughput over %d sec → %s MB/sec\n" "$DURATION" "$mbps"  
+        MEM_RESULT="$mbps"  
 
-write_results_file() {
-    {
-        echo "Single-test: $SINGLE_RESULT"
-        echo "Multi-test: $MULTI_RESULT"
-        echo "Mem-test: $MEM_RESULT"
-    } > "$RESULT_FILE"
-    echo "[INFO] Results saved to $RESULT_FILE"
-}
+        rm -f /dev/shm/memtest  
+    else
+        echo "[MEM] /proc/meminfo not found, skipping memory benchmark"
+        MEM_RESULT="N/A"
+    fi
+}  
 
-# MAIN
-print_banner
-print_system_info
-cpu_single
-cpu_multi
-mem_bench
-print_dashboard
+print_dashboard() {  
+    echo  
+    echo "############### BENCHMARK RESULTS ##########################"  
+    echo " "  
+    printf "Single-core CPU: %s thousand ops/sec\n" "$SINGLE_RESULT"  
+    printf "Multi-core CPU:  %s thousand ops/sec\n" "$MULTI_RESULT"  
+    printf "Memory:          %s MB/sec\n" "$MEM_RESULT"  
+    echo " "  
+    echo "#################################################################"  
+}  
+
+write_results_file() {  
+    {  
+        echo "Single-test: $SINGLE_RESULT"  
+        echo "Multi-test: $MULTI_RESULT"  
+        echo "Mem-test: $MEM_RESULT"  
+    } > "$RESULT_FILE"  
+    echo "[INFO] Results saved to $RESULT_FILE"  
+}  
+
+# MAIN  
+print_banner  
+print_system_info  
+cpu_single  
+cpu_multi  
+mem_bench  
+print_dashboard  
 write_results_file
