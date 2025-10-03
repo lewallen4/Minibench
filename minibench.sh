@@ -1,11 +1,16 @@
 #!/usr/bin/env bash  
 
+set -euo pipefail
+trap 'echo "[ERROR] Script failed at line $LINENO"; exit 1' ERR
+
 DURATION=60   # seconds to run each CPU test  
 RESULT_FILE="benchmark_results.txt"  
+MEM_FALLBACKS=""  # Track any memory fallback messages
 
 # ASCII Art banner  
 print_banner() {  
 cat << 'EOF'  
+#################################################################
 ____ ____ ____     ___  ____ _  _ ____ _  _   
 [__  |__| [__      |__] |___ |\ | |    |__|   
 ___] |  | ___] ___ |__] |___ | \| |___ |  |   
@@ -18,30 +23,17 @@ EOF
 # System info summary  
 print_system_info() {  
     echo  
-    echo "############### SYSTEM INFO ###############"  
+    echo "############### SYSTEM INFO #####################################"  
 
-    # User
     [ -n "$USER" ] && echo "User:       $USER"
+    if dir=$(pwd 2>/dev/null); then [ -n "$dir" ] && echo "Directory:  $dir"; fi
+    if host=$(hostname 2>/dev/null); then [ -n "$host" ] && echo "Hostname:   $host"; fi
 
-    # Directory
-    if dir=$(pwd 2>/dev/null); then
-        [ -n "$dir" ] && echo "Directory:  $dir"
-    fi
-
-    # Hostname
-    if host=$(hostname 2>/dev/null); then
-        [ -n "$host" ] && echo "Hostname:   $host"
-    fi
-
-    # OS
     os_name=$(uname -s 2>/dev/null)
     os_version=$(uname -r 2>/dev/null)
     arch=$(uname -m 2>/dev/null)
-    if [ -n "$os_name" ] && [ -n "$os_version" ] && [ -n "$arch" ]; then
-        echo "OS:         $os_name $os_version ($arch)"
-    fi
+    [ -n "$os_name" ] && [ -n "$os_version" ] && [ -n "$arch" ] && echo "OS:         $os_name $os_version ($arch)"
 
-    # CPU info
     if [ -f /proc/cpuinfo ]; then  
         model=$(awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ //')  
         cores=$(nproc 2>/dev/null)  
@@ -50,21 +42,17 @@ print_system_info() {
         echo "CPU:        Unknown"  
     fi  
 
-    # Memory info
     if [ -f /proc/meminfo ]; then  
         mem_total_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)  
         [ -n "$mem_total_mb" ] && echo "Memory:     ${mem_total_mb} MB"
     fi  
 
-    # Disk info
     if root_disk=$(df -h / 2>/dev/null | awk 'NR==2 {print $2 " total, " $3 " used, " $4 " free"}'); then
         [ -n "$root_disk" ] && echo "Disk (/):   $root_disk"
     fi
 
-    # Bash version
     [ -n "$BASH_VERSION" ] && echo "Bash:       $BASH_VERSION"
 
-    # Uptime
     if uptime_info=$(uptime -p 2>/dev/null); then
         [ -n "$uptime_info" ] && echo "Uptime:     $uptime_info"
     fi
@@ -122,39 +110,78 @@ cpu_multi() {
 
 mem_bench() {  
     echo "[MEM] Running benchmark for ${DURATION}s..."  
-    if [ -f /proc/meminfo ]; then
-        local total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)  
-        local mb=$(( total_mem_mb / 2 ))  
-        echo "[MEM] Using $mb MB per iteration"  
-
-        mkdir -p /dev/shm  
-        local start_ns=$(date +%s%N)  
-        local end_ns=$((start_ns + DURATION * 1000000000))  
-        local total_bytes=0  
-
-        while [ $(date +%s%N) -lt $end_ns ]; do  
-            dd if=/dev/zero of=/dev/shm/memtest bs=1M count=$mb conv=fdatasync status=none  
-            total_bytes=$((total_bytes + mb * 1024 * 1024))  
-        done  
-
-        local mbps=$(printf "%.2f" "$(awk "BEGIN {print $total_bytes/1024/1024/$DURATION}")")  
-        printf "[MEM] Average throughput over %d sec → %s MB/sec\n" "$DURATION" "$mbps"  
-        MEM_RESULT="$mbps"  
-
-        rm -f /dev/shm/memtest  
-    else
+    if [ ! -f /proc/meminfo ]; then
         echo "[MEM] /proc/meminfo not found, skipping memory benchmark"
         MEM_RESULT="N/A"
+        return
     fi
+
+    local mb=0
+    MEM_FALLBACKS=""
+    
+    # Try 95% of total memory
+    local total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+    mb=$(( total_mem_mb * 45 / 100 ))
+    echo "[MEM] Attempting to allocate $mb MB (45% of total memory)"
+    
+    mkdir -p /dev/shm || { echo "[ERROR] Cannot access /dev/shm"; MEM_RESULT="N/A"; return; }
+    
+    local start_ns=$(date +%s%N)
+    local end_ns=$((start_ns + DURATION * 1000000000))
+    local total_bytes=0
+
+    while true; do
+        if dd if=/dev/zero of=/dev/shm/memtest bs=1M count="$mb" conv=fdatasync status=none 2>/dev/null; then
+            total_bytes=$((total_bytes + mb * 1024 * 1024))
+            break
+        else
+            MEM_FALLBACKS="[WARN] 45% of MemTotal failed, trying 45% of MemAvailable"
+            # Try 95% of MemAvailable
+            mb=$(awk '/MemAvailable/ {print int($2/1024*0.45)}' /proc/meminfo)
+            if dd if=/dev/zero of=/dev/shm/memtest bs=1M count="$mb" conv=fdatasync status=none 2>/dev/null; then
+                total_bytes=$((total_bytes + mb * 1024 * 1024))
+                break
+            else
+                MEM_FALLBACKS="[WARN] MemAvailable failed, trying 50% of MemFree"
+                mb=$(awk '/MemFree/ {print int($2/1024/2)}' /proc/meminfo)
+                if dd if=/dev/zero of=/dev/shm/memtest bs=1M count="$mb" conv=fdatasync status=none 2>/dev/null; then
+                    total_bytes=$((total_bytes + mb * 1024 * 1024))
+                    break
+                else
+                    echo "[ERROR] Memory allocation failed at all fallback levels. Skipping memory benchmark."
+                    MEM_RESULT="N/A"
+                    MEM_FALLBACKS="[ERROR] All memory allocation attempts failed"
+                    return
+                fi
+            fi
+        fi
+    done
+
+    # Loop until duration completes
+    while [ $(date +%s%N) -lt $end_ns ]; do
+        if ! dd if=/dev/zero of=/dev/shm/memtest bs=1M count="$mb" conv=fdatasync status=none 2>/dev/null; then
+            echo "[WARN] Memory write failed during iteration, stopping loop"
+            break
+        fi
+        total_bytes=$((total_bytes + mb * 1024 * 1024))
+    done
+
+    MEM_RESULT=$(awk "BEGIN {print $total_bytes/1024/1024/$DURATION}")
+    printf "[MEM] Average throughput over %d sec → %.2f MB/sec\n" "$DURATION" "$MEM_RESULT"
+
+    rm -f /dev/shm/memtest
 }  
 
 print_dashboard() {  
     echo  
-    echo "############### BENCHMARK RESULTS ##########################"  
+    echo "############### BENCHMARK RESULTS ###############################"  
     echo " "  
     printf "Single-core CPU: %s thousand ops/sec\n" "$SINGLE_RESULT"  
     printf "Multi-core CPU:  %s thousand ops/sec\n" "$MULTI_RESULT"  
     printf "Memory:          %s MB/sec\n" "$MEM_RESULT"  
+    if [ -n "$MEM_FALLBACKS" ]; then
+        echo "$MEM_FALLBACKS"
+    fi
     echo " "  
     echo "#################################################################"  
 }  
@@ -164,6 +191,7 @@ write_results_file() {
         echo "Single-test: $SINGLE_RESULT"  
         echo "Multi-test: $MULTI_RESULT"  
         echo "Mem-test: $MEM_RESULT"  
+        [ -n "$MEM_FALLBACKS" ] && echo "$MEM_FALLBACKS"
     } > "$RESULT_FILE"  
     echo "[INFO] Results saved to $RESULT_FILE"  
 }  
