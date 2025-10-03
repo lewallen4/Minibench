@@ -23,7 +23,6 @@ EOF
 
 # System info summary  
 print_system_info() {  
-    echo  
     echo "############### SYSTEM INFO #####################################"  
 
     [ -n "$USER" ] && echo "User:       $USER"
