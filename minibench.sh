@@ -25,7 +25,7 @@ EOF
 print_system_info() {  
     echo "############### SYSTEM INFO #####################################"  
 
-    [ -n "$USER" ] && echo "User:       $USER"
+    if USER=$(whoami 2>/dev/null); then [ -n "$USER" ] && echo "User:  $USER"; fi
     if dir=$(pwd 2>/dev/null); then [ -n "$dir" ] && echo "Directory:  $dir"; fi
     if host=$(hostname 2>/dev/null); then [ -n "$host" ] && echo "Hostname:   $host"; fi
 
