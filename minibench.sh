@@ -8,8 +8,8 @@ RESULT_FILE="benchmark_results.txt"
 MEM_FALLBACKS=""  # Track any memory fallback messages
 
 # Baselines (arbitrary reference for an "8-core 3GHz" system)
-CPU_BASELINE=100000   # thousand ops/sec (multi-core)
-MEM_BASELINE=1000    # MB/sec (simple mem)
+CPU_BASELINE=100   # thousand ops/sec (multi-core)
+MEM_BASELINE=1000     # MB/sec (simple mem)
 
 CPU_SCORE=0
 MEM_SCORE=0
@@ -84,9 +84,8 @@ cpu_worker() {
 cpu_single() {  
     echo "[CPU] Single-core benchmark for ${DURATION}s..."  
     local ops=$(cpu_worker)  
-    local kops=$(printf "%.2f" "$(echo "$ops / 1000" | awk '{printf "%f", $1}')")  
-    printf "[CPU] Single-core → %s thousand ops/sec\n" "$kops"  
-    SINGLE_RESULT="$kops"  
+    SINGLE_RESULT=$(awk "BEGIN {printf \"%.4f\", $ops/1000}")
+    printf "[CPU] Single-core → %s thousand ops/sec\n" "$SINGLE_RESULT"  
 }  
 
 cpu_multi() {  
@@ -107,9 +106,8 @@ cpu_multi() {
         total=$((total + $(cat "$f")))  
     done  
 
-    local kops=$(printf "%.2f" "$(echo "$total / 1000" | awk '{printf "%f", $1}')")  
-    printf "[CPU] Multi-core → %s thousand ops/sec (all %d cores)\n" "$kops" "$cores"  
-    MULTI_RESULT="$kops"  
+    MULTI_RESULT=$(awk "BEGIN {printf \"%.4f\", $total/1000}")
+    printf "[CPU] Multi-core → %s thousand ops/sec (all %d cores)\n" "$MULTI_RESULT" "$cores"  
 
     rm -rf "$tmpdir"  
 }  
@@ -137,8 +135,8 @@ mem_simple_bench() {
 
     rm -f "$tmpfile"
 
-    SIMPLE_MEM_RESULT=$(awk "BEGIN {print $total_bytes/1024/1024/$duration}")
-    printf "[MEM-SIMPLE] Average throughput → %.2f MB/sec\n" "$SIMPLE_MEM_RESULT"
+    SIMPLE_MEM_RESULT=$(awk "BEGIN {printf \"%.4f\", $total_bytes/1024/1024/$duration}")
+    printf "[MEM-SIMPLE] Average throughput → %s MB/sec\n" "$SIMPLE_MEM_RESULT"
 }
 
 # ----------------------------
@@ -200,8 +198,8 @@ mem_bench() {
         total_bytes=$((total_bytes + mb * 1024 * 1024))
     done
 
-    MEM_RESULT=$(awk "BEGIN {print $total_bytes/1024/1024/$DURATION}")
-    printf "[MEM] Average throughput over %d sec → %.2f MB/sec\n" "$DURATION" "$MEM_RESULT"
+    MEM_RESULT=$(awk "BEGIN {printf \"%.4f\", $total_bytes/1024/1024/$DURATION}")
+    printf "[MEM] Average throughput over %d sec → %s MB/sec\n" "$DURATION" "$MEM_RESULT"
 
     rm -f /dev/shm/memtest
 }  
@@ -210,11 +208,11 @@ mem_bench() {
 # SCORING FUNCTIONS
 # ----------------------------
 calc_cpu_score() {
-    CPU_SCORE=$(awk -v r="$MULTI_RESULT" -v base="$CPU_BASELINE" 'BEGIN {printf "%.0f", (r/base)*100}')
+    CPU_SCORE=$(awk -v r="$MULTI_RESULT" -v base="$CPU_BASELINE" 'BEGIN {printf "%.2f", (r/base)*100}')
 }
 
 calc_mem_score() {
-    MEM_SCORE=$(awk -v r="$SIMPLE_MEM_RESULT" -v base="$MEM_BASELINE" 'BEGIN {printf "%.0f", (r/base)*100}')
+    MEM_SCORE=$(awk -v r="$SIMPLE_MEM_RESULT" -v base="$MEM_BASELINE" 'BEGIN {printf "%.2f", (r/base)*100}')
 }
 
 print_dashboard() {  
@@ -229,8 +227,8 @@ print_dashboard() {
         echo "$MEM_FALLBACKS"
     fi
     echo " "  
-    printf "CPU Score:       %d\n" "$CPU_SCORE"
-    printf "Memory Score:    %d\n" "$MEM_SCORE"
+    printf "CPU Score:       %s\n" "$CPU_SCORE"
+    printf "Memory Score:    %s\n" "$MEM_SCORE"
     echo " "  
     echo "#################################################################"  
 }  
