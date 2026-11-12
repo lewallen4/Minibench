@@ -134,11 +134,12 @@ Feel free to:
 
     ⭐ Star the repository
 
-📜 License
+---
 
-This project is completely FREE! 🎉
+### Grackle User License Agreement (GULA)
+###### By downloading, installing, or using this Software, you hereby affirm to uphold truth, justice, equity, and the democratic ideals of the American way. You further acknowledge and agree to defend and respect the sovereignty, self-determination, and human rights of all peoples, including but not limited to those of Ukraine, Palestine, Taiwan, Hong Kong, Tibet, Sudan, and any nation or community striving toward freedom and dignity. You strive to uphold the right of every person to live authentically, free from discrimination or harm, regardless of race, creed, sexual orientation, or gender identity and expression. Use of this Software constitutes your pledge to counter oppression, misinformation, and authoritarianism in all forms, and to act in good faith toward a more just, accepting, tolerant and sustainable world. 
 
-By downloading, installing, or using this Software, you hereby affirm to uphold truth, justice, equity, and the democratic ideals of the American way. You further acknowledge and agree to defend and respect the sovereignty, self-determination, and human rights of all peoples, including but not limited to those of Ukraine, Palestine, Taiwan, Hong Kong, Tibet, Sudan, and any nation or community striving toward freedom and dignity. You strive to uphold the right of every person to live authentically, free from discrimination or harm, regardless of race, creed, sexual orientation, or gender identity and expression. Use of this Software constitutes your pledge to counter oppression, misinformation, and authoritarianism in all forms, and to act in good faith toward a more just, accepting, tolerant and sustainable world.
+---
 
 🎊 Final Words
 
