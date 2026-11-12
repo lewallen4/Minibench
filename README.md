@@ -2,99 +2,124 @@ MiniBench
 
 ![Badge Label](https://img.shields.io/badge/System-Benchmark-ff69b4) ![Badge Label](https://img.shields.io/badge/Bash-Script-green) ![Badge Label](https://img.shields.io/badge/License-Free-brightgreen)
 
-A beautiful and efficient bash script that benchmarks your system's CPU and memory performance with stunning visual output! ✨
+Benchy Ult: a beautiful, portable bash script that benchmarks your system's CPU and memory and gives you numbers you can actually compare, on any machine with bash! ✨
 🎯 What This Script Does
 
 This amazing script performs comprehensive system benchmarking:
 
-    🎵 Single-Core CPU Test - Measures raw single-threaded performance
+    🎵 Single-Core CPU Test - 30 seconds of sustained integer math on one core
 
-    🚀 Multi-Core CPU Test - Leverages all available CPU cores simultaneously
+    🚀 Multi-Core CPU Test - 30 seconds of sustained load on every core at once
 
-    💾 Memory Benchmark - Tests memory write throughput with intelligent fallbacks
+    💾 Memory Test - Measures RAM speed on one core, then on all cores together
 
-    📊 System Info - Displays comprehensive hardware and OS information
+    📊 System Info - Displays hardware, OS and tool information
 
 🛠 Features That Sparkle
 
-    ✨ ASCII Art Banner
+    ✨ Colour Gradient ASCII Art Banner (plain text when piped or with NO_COLOR)
 
-    🖥 Complete System Information
+    🖥 Runs Anywhere With Bash - Linux, macOS, Windows Git Bash/MSYS2/Cygwin, WSL, BSD
 
-    🎯 Smart Memory Allocation with automatic fallbacks
+    🎯 Consistent Results - warmup, repeated trials, median and spread for every test
 
     ⏱ Configurable Test Duration
 
-    💾 Results Export to text file
+    💾 Simple Results File you can hand to anyone
 
-    🛡 Error Handling with graceful failure recovery
+    🛡 Error Handling - one failed test never stops the others
 
-    🎪 Colorful Visual Output
+    🎪 Score Bars for every result
 
 🚀 Quick Start
 Prerequisites
 
-    Linux system with /proc filesystem
-
-    Bash shell
+    Any system with bash 3.2 or newer (Linux, macOS, Windows Git Bash, WSL, BSD)
 
     Basic utilities: awk, dd, mktemp
 
 Installation & Usage
 ```
 # Download the script
-curl -O https://raw.githubusercontent.com/your-repo/benchmark.sh
+curl -O https://raw.githubusercontent.com/lewallen4/Minibench/main/minibench.sh
 
 # Make it executable
-chmod +x benchmark.sh
+chmod +x minibench.sh
 
 # Run the benchmark!
-./benchmark.sh
+./minibench.sh
 ```
 
 One-liner Installation
 
 
 ```
-curl -sL https://raw.githubusercontent.com/your-repo/benchmark.sh | bash
+curl -sL https://raw.githubusercontent.com/lewallen4/Minibench/main/minibench.sh -o minibench.sh && bash minibench.sh
 ```
 
 ⚙️ Configuration
 
-Easily customize the benchmark duration by editing the DURATION variable:
+A full run takes about 90 seconds. Change it with options:
 
 ```
-DURATION=120   # Change this to run longer tests (in seconds)
+./minibench.sh --quick        # ~15 seconds, 5 s CPU tests
+./minibench.sh --thorough     # ~3 minutes, steadiest numbers
+./minibench.sh -c 60          # 60 seconds per CPU test
+./minibench.sh -o mypc.txt    # choose the results file name
+./minibench.sh --no-color     # plain output
+./minibench.sh -h             # every option
 ```
 📈 Understanding Results
 
-    Single-Core CPU: Higher is better! Measures computational speed per core
+The results file (benchy_ult_results.txt) is short on purpose, so an engineer can run the benchmark and hand the file to anyone:
 
-    Multi-Core CPU: Shows parallel processing capability across all cores
+```
+Benchy Ult v2.2.0
+=================
+Single-core: 533814 ops/sec
+Multi-core: 2244527 ops/sec
+Memory: 22870 MiB/sec
+CPU-score: 1005
+Memory-score: 986
+Ult-score: 995
+```
 
-    Memory Throughput: Indicates RAM write speed in MB/second
+    Single-core / Multi-core: integer operations per second. Higher is better!
+
+    Memory: MiB per second all cores can write to RAM together. Higher is better!
+
+    Scores: 1000 = the reference machine (a 4-core Xeon cloud server). 2000 = twice as fast
+
+    CPU-score: single-core and multi-core combined
+
+    Memory-score: the all-cores memory result
+
+    Ult-score: CPU and Memory combined, weighted equally. The one number to compare machines by
+
+The terminal output has the full detail for engineers: how much each test varied between trials, the single-core memory speed, which memory method ran, and Classic scores on the original MiniBench scale.
 
 🎪 Technical Highlights
-Smart Memory Allocation
+Smart Memory Testing
 
-The script intelligently handles memory allocation with multiple fallback levels:
+The script picks the first memory method that works and gives a believable number:
 
-    45% of Total Memory (primary attempt)
+    dd fill - /dev/zero to /dev/null in 256 MiB blocks, pure RAM, no disk (primary)
 
-    45% of Available Memory (first fallback)
+    tmpfs write - a file in /dev/shm, only where it really is RAM (Linux)
 
-    50% of Free Memory (final fallback)
+    awk copy - large string copies inside awk, no device files at all
 
-Robust Error Handling
-```
+    PowerShell - a .NET memory copy, Windows only, used only if everything else fails
 
-set -euo pipefail
-trap 'echo "[ERROR] Script failed at line $LINENO"; exit 1' ERR
-```
+No test ever allocates more than a quarter of your RAM.
+
+Accurate Timing
+
+The clock is read only at the start and end of each trial, never inside the measured loop. It uses bash's built-in clock when available, then GNU date, perl or python.
 
 Clean Temporary Management
 
-Uses mktemp for safe temporary file handling and automatic cleanup.
+Uses mktemp for safe temporary file handling and automatic cleanup, even if you press Ctrl-C.
 🤝 Contributing
 
 Love this script? Want to make it even more amazing? Contributions are welcome!
