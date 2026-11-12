@@ -163,7 +163,6 @@ print_banner() {
 EOF
     printf '   %s%s>>>  U L T I M A T E   E D I T I O N  <<<%s   %sminibench v%s%s\n' \
         "$C_B" "$C_YEL" "$C_RST" "$C_GRY" "$BENCHY_VERSION" "$C_RST"
-    printf '   %sone script . any bash . same numbers%s\n' "$C_DIM" "$C_RST"
 }
 
 usage() {
