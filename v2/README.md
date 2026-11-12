@@ -3,14 +3,16 @@
 One script, any machine with bash, numbers you can compare.
 
 ```
-bash v2/benchy-ult.sh            # ~45 s: 5 trials x 2 s per test
-bash v2/benchy-ult.sh --quick    # ~15 s
-bash v2/benchy-ult.sh --thorough # ~2-3 min, steadiest numbers
+bash v2/benchy-ult.sh            # ~85 s: 30 s sustained per CPU test
+bash v2/benchy-ult.sh --quick    # ~15 s: 5 s CPU tests
+bash v2/benchy-ult.sh --thorough # ~3 min: 60 s CPU tests
+bash v2/benchy-ult.sh -c 45      # any CPU test length you like
 bash v2/benchy-ult.sh -h         # every option
 ```
 
-The v1 script (`minibench.sh`) is untouched. Benchy Ult also prints v1-scale
-scores so old results stay comparable.
+The v1 script (`minibench.sh`) is untouched. Benchy Ult also prints a CPU
+Score and Memory Score on the same scale as v1, so old results stay
+comparable.
 
 ## What changed from v1
 
@@ -19,12 +21,12 @@ scores so old results stay comparable.
 | CPU units | Loop passes per **60 s**, labelled "ops/sec" | Real ops per second |
 | What the CPU test measured | Mostly how fast the OS can fork `date` (one fork per loop pass) | bash integer math; the clock is read only at the start and end of a trial |
 | Timing | `date +%s%N` (GNU only, breaks on macOS) | `$EPOCHREALTIME` (no fork), then GNU date, perl, python3, 1 s clock |
-| Repeatability | One 60 s run per test | Calibrated warmup, then N trials; median and spread reported, noisy runs flagged |
+| Repeatability | One 60 s run per test | Calibrated warmup, then a 30 s sustained load per CPU test split into 5 trials; median and spread reported, noisy runs flagged |
 | Multi-core | Wall time of the slowest worker | Start barrier, each worker times itself, rates summed |
 | Memory | Writes a file of 45% of RAM to `/dev/shm` | 256 MiB in-RAM fill; no huge allocations, no disk |
 | Memory fallbacks | Retry the same method with smaller sizes | Four different methods, each result sanity-checked |
 | Windows | `/dev/shm` is on disk, results swing (see below) | dd fill, then awk, then a PowerShell/.NET test only for Windows |
-| Output | Fixed text | Colour gradient banner (plain when piped, `NO_COLOR`, or `--no-color`), score bars, results file + CSV history |
+| Output | Fixed text | Colour gradient banner (plain when piped, `NO_COLOR`, or `--no-color`), score bars, a short results file |
 | Errors | `set -e` + ERR trap kills the run on the first odd exit code | Every step checked; one failed test doesn't stop the others; temp files always cleaned up |
 
 ## Scores
@@ -92,17 +94,51 @@ it depends on how Git Bash/MSYS2/Cygwin behave and wasn't run on Windows.
 Benchy Ult avoids all of these: no `/dev/shm` on Windows, no file bigger than
 256 MiB, no `/proc/meminfo` dependency, and a timed fixed amount of work.
 
-## Files written
+## Results file
 
-* `benchy_ult_results.txt`: key=value results of the last run (`-o FILE` to change).
-* `benchy_ult_history.csv`: one row per run, for comparing machines (`--no-history` to skip).
+`benchy_ult_results.txt` (`-o FILE` to change), in the style of v1's
+`benchmark_results.txt`:
+
+```
+Benchy Ult v2.1.0
+=================
+Single-core: 528384 ops/sec
+Multi-core: 2188411 ops/sec
+Memory: 7037.0 MiB/sec (dd)
+Single-score: 984
+Multi-score: 990
+Mem-score: 991
+Ult-score: 988
+CPU-score: 161.27
+Memory-score: 135.04
+```
+
+`CPU-score` and `Memory-score` are on v1's scale.
+
+## How accurate is the memory number?
+
+Checked on the Linux reference VM; Windows notes are from how Git Bash works.
+
+* **dd (the usual method)** measures how fast one core can fill RAM.
+  Verified on Linux: 1 MiB blocks stay in CPU cache (54 GB/s), 64 MiB and up
+  level off at ~7 GB/s, so 256 MiB blocks do hit RAM. The result was within
+  ~15% of a native C `memset` on the same machine.
+* **It is one core, not the whole memory system.** Verified: four dd fills
+  in parallel moved ~25 GB/s in total on the same VM. Machines with more
+  memory channels pull further ahead than this number shows.
+* **On Windows** Git Bash's runtime fills the buffer itself instead of the
+  kernel, and nothing touches the disk (inferred from the MSYS2/Cygwin design).
+  So Linux and Windows dd numbers measure the same thing and are roughly
+  comparable, but not exact: the fill code differs between the two.
+* **tmpfs, awk and PowerShell** measure different things (page-cache writes,
+  awk's string copies, .NET buffer copies), so only compare runs that used
+  the same method. The results file names the method.
 
 ## Tested
 
 * Linux (Ubuntu 24.04, bash 5.2): every memory method, every clock source,
   gawk, mawk, one-true-awk and BusyBox awk/dd, `sh` re-exec, `NO_COLOR`,
   piped output, `shellcheck` clean.
-* Windows paths: simulated (fake `uname` and `powershell.exe`) to check the
-  cascade and the exact PowerShell command line. Not yet run on a real
-  Windows machine.
+* Windows: v2.0.0 run by Skye on Windows, RAM test worked. The PowerShell
+  fallback has only been tested in simulation.
 * macOS: written for bash 3.2 and BSD tools, not yet run on a Mac.
