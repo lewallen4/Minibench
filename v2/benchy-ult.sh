@@ -41,7 +41,7 @@ set -u
 export LC_ALL=C
 export LANG=C
 
-BENCHY_VERSION="2.1.0"
+BENCHY_VERSION="2.2.0"
 
 # ---- defaults (each can also be set by environment variable) ---------------
 TRIALS="${BENCHY_TRIALS:-5}"              # timed trials per test
@@ -64,6 +64,9 @@ REF_MULTI=2210000       # ops/s, all cores
 # PowerShell has none yet: it needs a Windows box to measure.
 # shellcheck disable=SC2034
 REF_MEM_dd=7100 REF_MEM_tmpfs=2750 REF_MEM_awk=1750 REF_MEM_powershell=""
+# All-cores memory (one fill per core, summed), MiB/s.
+# shellcheck disable=SC2034
+REF_MEMALL_dd=23200 REF_MEMALL_awk=6850
 
 # =============================================================================
 #  Output helpers and colour
@@ -175,7 +178,7 @@ Usage: bash benchy-ult.sh [options]
   -t, --trials N         timed trials per test (default $TRIALS)
   -s, --seconds S        seconds per memory trial (default $TRIAL_SECS)
   -m, --mem-method M     auto|dd|tmpfs|awk|powershell (default $MEM_METHOD)
-      --no-legacy        skip the CPU Score / Memory Score section
+      --no-legacy        skip the classic (minibench v1 scale) scores
   -o, --output FILE      results file (default $RESULT_FILE)
       --color / --no-color
   -h, --help             this help
@@ -732,6 +735,84 @@ mem_try_powershell() {
     return 0
 }
 
+# ---- all-cores memory: one fill per core at once, rates summed --------------
+# Runs the same unit as the single-core method (dd or awk), one copy per core,
+# behind a start barrier; each copy times itself. This is the total bandwidth
+# the memory system can deliver, which one core alone can't reach.
+MEMALL_RATE=0 MEMALL_SP=0 MEMALL_WORKERS=0 MEMALL_FN="" MEMALL_NOTE="" _MAXEL=0
+
+u_mem_all() {
+    local n=$1 i=0 go="$TMPD/mgo"
+    rm -f "$go" "$TMPD"/m.*
+    while [ "$i" -lt "$MEMALL_WORKERS" ]; do
+        (
+            while [ ! -f "$go" ]; do sleep "$POLL" 2>/dev/null || sleep 1; done
+            if "$MEMALL_FN" "$n" && [ "$_ELAPSED_US" -gt 0 ]; then
+                echo "$_WORK $_ELAPSED_US" > "$TMPD/m.$i"
+            fi
+            exit 0
+        ) &
+        i=$((i + 1))
+    done
+    : > "$go"
+    wait
+    local out
+    out=$(cat "$TMPD"/m.* 2>/dev/null | awk -v c="$MEMALL_WORKERS" '
+        $2 > 0 { r += $1 * 1000000 / $2; k++; if ($2 > mx) mx = $2 }
+        END { if (k == c) printf "%.0f %d", r, mx; else print "0 0" }')
+    # shellcheck disable=SC2086
+    set -- $out
+    _WORK=$1 _MAXEL=$2 _ELAPSED_US=1000000
+    [ "$_WORK" != 0 ]
+}
+
+mem_all_cores() {
+    MEMALL_NOTE=""
+    case "$MEM_USED" in
+        dd)  MEMALL_FN=u_mem_dd ;;
+        awk) MEMALL_FN=u_mem_awk ;;
+        *)   MEMALL_NOTE="not available with the $MEM_USED method"; return 1 ;;
+    esac
+    # Keep every worker's buffer in check: all of them together get at most
+    # a quarter of RAM. Big machines use 64 MiB dd blocks (still far larger
+    # than any CPU cache) and, if needed, fewer workers.
+    local per_mb=256 cap
+    if [ "$MEM_USED" = dd ]; then
+        if [ "$MEM_TOTAL_MB" -gt 0 ] && [ $((CORES * MEM_BS / 1048576)) -gt $((MEM_TOTAL_MB / 4)) ]; then
+            MEM_BS=67108864
+        fi
+        per_mb=$((MEM_BS / 1048576))
+    else
+        per_mb=128
+    fi
+    MEMALL_WORKERS=$CORES
+    if [ "$MEM_TOTAL_MB" -gt 0 ]; then
+        cap=$((MEM_TOTAL_MB / 4 / per_mb))
+        [ "$cap" -lt 1 ] && cap=1
+        [ "$MEMALL_WORKERS" -gt "$cap" ] && MEMALL_WORKERS=$cap
+    fi
+    printf '  %-28s ' "All cores (${MEMALL_WORKERS} workers)"
+    # Warmup that also sizes the work: under contention each worker is slower
+    # than one alone, and a trial should still last TRIAL_SECS.
+    local n=1
+    if ! u_mem_all "$n"; then
+        printf 'failed\n'; MEMALL_NOTE="workers failed"; return 1
+    fi
+    if [ "$_MAXEL" -gt 0 ]; then
+        n=$(awk -v n="$n" -v e="$_MAXEL" -v t="$TRIAL_US" 'BEGIN{x = int(n * t / e + 0.5); if (x < 1) x = 1; printf "%d", x}')
+    fi
+    dots
+    if ! run_fixed u_mem_all "$n"; then
+        printf ' failed\n'; MEMALL_NOTE="workers failed"; return 1
+    fi
+    stats "$RATES"
+    MEMALL_RATE=$(awk -v r="$ST_MED" 'BEGIN{printf "%.1f", r/1048576}')
+    MEMALL_SP=$ST_SPREAD
+    printf ' %s%s%s MiB/s %s\n' "$C_B" "$(fmt_int "$MEMALL_RATE")" "$C_RST" "$(noise_tag "$MEMALL_SP")"
+    printf '  %-28s  %sx one core\n' "Memory scaling" \
+        "$(awk -v a="$MEMALL_RATE" -v b="$MEM_RATE" 'BEGIN{printf "%.2f", (b > 0) ? a / b : 0}')"
+}
+
 mem_tests() {
     section "MEMORY"
     local order m mibs
@@ -753,6 +834,7 @@ mem_tests() {
             MEM_LOG="$MEM_LOG $m:ok"
             printf ' %s%s%s MiB/s %s\n' "$C_B" "$(fmt_int "$MEM_RATE")" "$C_RST" "$(noise_tag "$MEM_SP")"
             printf '  %-28s  %s\n' "Method" "$MEM_DESC"
+            mem_all_cores || printf '  %-28s  %sn/a (%s)%s\n' "All cores" "$C_GRY" "$MEMALL_NOTE" "$C_RST"
             return 0
         fi
         MEM_LOG="$MEM_LOG $m:implausible(${mibs}MiB/s)"
@@ -784,7 +866,7 @@ legacy_worker() {
 
 legacy_tests() {
     [ "$LEGACY" -eq 1 ] || return 0
-    section "SCORES"
+    section "CLASSIC SCORES"
     if [ "$DATE_NS_OK" -ne 1 ]; then
         LEG_NOTE="needs GNU date with %N support"
         warn "Skipped: $LEG_NOTE"
@@ -804,7 +886,7 @@ legacy_tests() {
         i=$((i + 1))
     done
     LEG_CPU=$(awk -v t="$total" -v s="$LEGACY_SECS" 'BEGIN{printf "%.2f", t*60/s/1000}')
-    printf ' CPU Score %s%s%s\n' "$C_B" "$LEG_CPU" "$C_RST"
+    printf ' Classic CPU Score %s%s%s\n' "$C_B" "$LEG_CPU" "$C_RST"
 
     printf '  %-28s ' "Memory loop (5s)"
     if ! dd if=/dev/zero of="$TMPD/fdtest" bs=1 count=1 conv=fdatasync 2>/dev/null; then
@@ -821,13 +903,13 @@ legacy_tests() {
     done
     rm -f "$f"
     LEG_MEM=$(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1048576/5/1000*100}')
-    printf ' Memory Score %s%s%s\n' "$C_B" "$LEG_MEM" "$C_RST"
+    printf ' Classic Memory Score %s%s%s\n' "$C_B" "$LEG_MEM" "$C_RST"
 }
 
 # =============================================================================
 #  Scores, dashboard, files
 # =============================================================================
-SC_SINGLE="" SC_MULTI="" SC_MEM="" SC_ALL=""
+SC_SINGLE="" SC_MULTI="" SC_MEM="" SC_MEMALL="" SC_CPU="" SC_MEMFINAL="" SC_ALL=""
 
 score_of() {   # score_of VALUE REF -> 1000 * value/ref, or empty
     [ -n "$2" ] || return 0
@@ -842,17 +924,34 @@ calc_scores() {
         local ref
         eval "ref=\${REF_MEM_$MEM_USED:-}"
         SC_MEM=$(score_of "$MEM_RATE" "$ref")
+        if [ "$MEMALL_RATE" != 0 ]; then
+            eval "ref=\${REF_MEMALL_$MEM_USED:-}"
+            SC_MEMALL=$(score_of "$MEMALL_RATE" "$ref")
+        fi
     fi
-    SC_ALL=$(awk -v a="$SC_SINGLE" -v b="$SC_MULTI" -v c="$SC_MEM" 'BEGIN{
+    # CPU score    = geometric mean of single-core and multi-core.
+    # Memory score = all-cores memory (total bandwidth), or the single-core
+    #                memory score when the method can't run on all cores.
+    # ULT score    = geometric mean of CPU and Memory, so they weigh the same.
+    SC_CPU=$(gmean "$SC_SINGLE" "$SC_MULTI")
+    SC_MEMFINAL=${SC_MEMALL:-$SC_MEM}
+    SC_ALL=""
+    # Only a full result gets a ULT score, so a failed test can't flatter it.
+    if [ -n "$SC_CPU" ] && [ -n "$SC_MEMFINAL" ]; then SC_ALL=$(gmean "$SC_CPU" "$SC_MEMFINAL"); fi
+}
+
+gmean() {   # geometric mean of the non-empty arguments (arithmetic if awk lacks log)
+    local r
+    r=$(awk -v a="${1:-}" -v b="${2:-}" 'BEGIN{
         n = 0; s = 0
         if (a > 0) { s += log(a); n++ }
         if (b > 0) { s += log(b); n++ }
-        if (c > 0) { s += log(c); n++ }
         if (n) printf "%.0f", exp(s / n) }' 2>/dev/null)
-    if [ -z "$SC_ALL" ]; then   # awk built without log/exp (some BusyBox builds)
-        SC_ALL=$(awk -v a="$SC_SINGLE" -v b="$SC_MULTI" -v c="$SC_MEM" 'BEGIN{
-            n = (a > 0) + (b > 0) + (c > 0); if (n) printf "%.0f", (a + b + c) / n }')
+    if [ -z "$r" ]; then
+        r=$(awk -v a="${1:-}" -v b="${2:-}" 'BEGIN{
+            n = (a > 0) + (b > 0); if (n) printf "%.0f", ((a > 0 ? a : 0) + (b > 0 ? b : 0)) / n }')
     fi
+    printf '%s' "$r"
 }
 
 bar() {   # bar SCORE -> 30-char bar, full at 2000
@@ -879,14 +978,20 @@ print_dashboard() {
     printf '  %-26s %15s%%\n' "CPU scaling" "$SCALING"
     if [ "$MEM_USED" != none ]; then
         printf '  %-26s %16s MiB/s  %s\n' "Memory ($MEM_USED)" "$(fmt_int "$MEM_RATE")" "$(noise_tag "$MEM_SP")"
+        if [ "$MEMALL_RATE" != 0 ]; then
+            printf '  %-26s %16s MiB/s  %s\n' "Memory all-cores" "$(fmt_int "$MEMALL_RATE")" "$(noise_tag "$MEMALL_SP")"
+        fi
     else
         printf '  %-26s %16s\n' "Memory" "FAILED"
     fi
     printf '\n  %sScores (1000 = reference 4-vCPU Xeon cloud VM; higher is better)%s\n' "$C_DIM" "$C_RST"
     score_row "Single-core" "$SC_SINGLE"
     score_row "Multi-core" "$SC_MULTI"
-    score_row "Memory" "$SC_MEM"
+    score_row "Memory 1-core" "$SC_MEM"
+    score_row "Memory all" "$SC_MEMALL"
     printf '  %s\n' "$(printf '%*s' 52 '' | tr ' ' '-')"
+    score_row "CPU" "$SC_CPU"
+    score_row "Memory" "$SC_MEMFINAL"
     if [ -n "$SC_ALL" ]; then
         printf '  %s%s%-14s%s %s %s%s%6s%s\n' "$C_B" "$C_MAG" "ULT SCORE" "$C_RST" "$(bar "$SC_ALL")" "$C_B" "$C_YEL" "$SC_ALL" "$C_RST"
     fi
@@ -895,10 +1000,10 @@ print_dashboard() {
     fi
     if [ -n "$LEG_CPU$LEG_MEM" ]; then
         printf '\n'
-        printf '  %-26s %s\n' "CPU Score" "${LEG_CPU:-n/a}"
-        printf '  %-26s %s\n' "Memory Score" "${LEG_MEM:-n/a}"
+        printf '  %-26s %s\n' "Classic CPU Score" "${LEG_CPU:-n/a}"
+        printf '  %-26s %s\n' "Classic Memory Score" "${LEG_MEM:-n/a}"
     fi
-    if awk -v a="$SINGLE_SP" -v b="$MULTI_SP" -v c="$MEM_SP" 'BEGIN{exit !(a > 10 || b > 10 || c > 10)}'; then
+    if awk -v a="$SINGLE_SP" -v b="$MULTI_SP" -v c="$MEM_SP" -v d="$MEMALL_SP" 'BEGIN{exit !(a > 10 || b > 10 || c > 10 || d > 10)}'; then
         printf '\n'
         warn "Some results varied more than 10% between trials. Close other apps, plug in power,"
         warn "and try --thorough for steadier numbers."
@@ -908,23 +1013,22 @@ print_dashboard() {
 write_results() {
     local out="$RESULT_FILE"
     if [ ! -w "$(dirname "$out")" ]; then out="${TMPDIR:-/tmp}/$(basename "$out")"; fi
+    # Short, plain file for handing to someone else: three speeds, three scores.
+    local mem_speed=$MEM_RATE
+    [ "$MEMALL_RATE" != 0 ] && mem_speed=$MEMALL_RATE
     {
         echo "Benchy Ult v$BENCHY_VERSION"
         echo "================="
         printf 'Single-core: %.0f ops/sec\n' "$SINGLE"
         printf 'Multi-core: %.0f ops/sec\n' "$MULTI"
         if [ "$MEM_USED" != none ]; then
-            echo "Memory: $MEM_RATE MiB/sec ($MEM_USED)"
+            printf 'Memory: %.0f MiB/sec\n' "$mem_speed"
         else
             echo "Memory: N/A"
         fi
-        echo "Single-score: ${SC_SINGLE:-N/A}"
-        echo "Multi-score: ${SC_MULTI:-N/A}"
-        echo "Mem-score: ${SC_MEM:-N/A}"
+        echo "CPU-score: ${SC_CPU:-N/A}"
+        echo "Memory-score: ${SC_MEMFINAL:-N/A}"
         echo "Ult-score: ${SC_ALL:-N/A}"
-        [ -n "$LEG_CPU" ] && echo "CPU-score: $LEG_CPU"
-        [ -n "$LEG_MEM" ] && echo "Memory-score: $LEG_MEM"
-        true
     } > "$out" 2>/dev/null && ok "Results saved to $out"
 }
 
