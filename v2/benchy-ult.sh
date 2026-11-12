@@ -12,7 +12,9 @@
 #  How it stays consistent from run to run and machine to machine:
 #    * Fixed work, timed once: the clock is read only at the start and end of
 #      each trial, never inside the measured loop.
-#    * Self-calibrating: each test sizes its work to ~TRIAL_SECS per trial, so
+#    * Sustained CPU load: single-core and multi-core each run for CPU_SECS
+#      (30 s by default), split into trials so the spread can be measured.
+#    * Self-calibrating: each test sizes its work to its trial length, so
 #      a Raspberry Pi and a 64-core server both get statistically useful runs.
 #    * The calibration pass doubles as a warmup and is thrown away.
 #    * Several trials per test; the median is reported along with the spread,
@@ -39,19 +41,18 @@ set -u
 export LC_ALL=C
 export LANG=C
 
-BENCHY_VERSION="2.0.0"
+BENCHY_VERSION="2.2.0"
 
 # ---- defaults (each can also be set by environment variable) ---------------
 TRIALS="${BENCHY_TRIALS:-5}"              # timed trials per test
-TRIAL_SECS="${BENCHY_TRIAL_SECS:-2}"      # target length of one trial
+TRIAL_SECS="${BENCHY_TRIAL_SECS:-2}"      # target length of one memory trial
+CPU_SECS="${BENCHY_CPU_SECS:-30}"         # sustained load per CPU test (single, multi)
 MEM_METHOD="${BENCHY_MEM_METHOD:-auto}"   # auto|dd|tmpfs|awk|powershell
 FORCE_FAIL="${BENCHY_FORCE_FAIL:-}"       # e.g. "dd tmpfs awk" to test the cascade
 LEGACY="${BENCHY_LEGACY:-1}"              # 1 = also print v1-scale scores
 LEGACY_SECS=5
 COLOR_MODE="${BENCHY_COLOR:-auto}"        # auto|always|never
 RESULT_FILE="${BENCHY_RESULT_FILE:-benchy_ult_results.txt}"
-HISTORY_FILE="${BENCHY_HISTORY_FILE:-benchy_ult_history.csv}"
-WRITE_HISTORY=1
 CORES_OVERRIDE="${BENCHY_CORES:-}"
 
 # ---- reference machine: every score is 1000 on this box ---------------------
@@ -63,6 +64,9 @@ REF_MULTI=2210000       # ops/s, all cores
 # PowerShell has none yet: it needs a Windows box to measure.
 # shellcheck disable=SC2034
 REF_MEM_dd=7100 REF_MEM_tmpfs=2750 REF_MEM_awk=1750 REF_MEM_powershell=""
+# All-cores memory (one fill per core, summed), MiB/s.
+# shellcheck disable=SC2034
+REF_MEMALL_dd=23200 REF_MEMALL_awk=6850
 
 # =============================================================================
 #  Output helpers and colour
@@ -168,20 +172,20 @@ Benchy Ult $BENCHY_VERSION -- portable CPU + memory benchmark (minibench v2)
 
 Usage: bash benchy-ult.sh [options]
 
-  -q, --quick            3 trials of 0.5 s, no legacy scores (~15 s total)
-      --thorough         9 trials of 3 s (~2-3 min, steadiest numbers)
+  -q, --quick            5 s CPU tests, short memory test, no legacy (~20 s)
+      --thorough         60 s CPU tests, 9 trials each (~3 min, steadiest)
+  -c, --cpu-seconds S    sustained seconds per CPU test (default $CPU_SECS)
   -t, --trials N         timed trials per test (default $TRIALS)
-  -s, --seconds S        target seconds per trial (default $TRIAL_SECS)
+  -s, --seconds S        seconds per memory trial (default $TRIAL_SECS)
   -m, --mem-method M     auto|dd|tmpfs|awk|powershell (default $MEM_METHOD)
-      --no-legacy        skip the v1-scale scores
+      --no-legacy        skip the classic (minibench v1 scale) scores
   -o, --output FILE      results file (default $RESULT_FILE)
-      --no-history       don't append to $HISTORY_FILE
       --color / --no-color
   -h, --help             this help
   -V, --version          print version
 
-Environment: BENCHY_TRIALS, BENCHY_TRIAL_SECS, BENCHY_MEM_METHOD, BENCHY_LEGACY,
-BENCHY_CORES, BENCHY_COLOR, NO_COLOR, BENCHY_CLOCK, BENCHY_RESULT_FILE, BENCHY_HISTORY_FILE,
+Environment: BENCHY_CPU_SECS, BENCHY_TRIALS, BENCHY_TRIAL_SECS, BENCHY_MEM_METHOD, BENCHY_LEGACY,
+BENCHY_CORES, BENCHY_COLOR, NO_COLOR, BENCHY_CLOCK, BENCHY_RESULT_FILE,
 BENCHY_FORCE_FAIL (space-separated memory methods to treat as failed, for
 testing the fallback cascade, e.g. BENCHY_FORCE_FAIL="dd tmpfs awk").
 EOF
@@ -190,14 +194,14 @@ EOF
 parse_args() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            -q|--quick)      TRIALS=3; TRIAL_SECS=0.5; LEGACY=0 ;;
-            --thorough)      TRIALS=9; TRIAL_SECS=3 ;;
+            -q|--quick)      TRIALS=3; TRIAL_SECS=0.5; CPU_SECS=5; LEGACY=0 ;;
+            --thorough)      TRIALS=9; TRIAL_SECS=3; CPU_SECS=60 ;;
+            -c|--cpu-seconds) [ $# -ge 2 ] || { err "$1 needs a value"; exit 2; }; CPU_SECS=$2; shift ;;
             -t|--trials)     [ $# -ge 2 ] || { err "$1 needs a value"; exit 2; }; TRIALS=$2; shift ;;
             -s|--seconds)    [ $# -ge 2 ] || { err "$1 needs a value"; exit 2; }; TRIAL_SECS=$2; shift ;;
             -m|--mem-method) [ $# -ge 2 ] || { err "$1 needs a value"; exit 2; }; MEM_METHOD=$2; shift ;;
             --no-legacy)     LEGACY=0 ;;
             -o|--output)     [ $# -ge 2 ] || { err "$1 needs a value"; exit 2; }; RESULT_FILE=$2; shift ;;
-            --no-history)    WRITE_HISTORY=0 ;;
             --color)         COLOR_MODE=always ;;
             --no-color)      COLOR_MODE=never ;;
             -h|--help)       usage; exit 0 ;;
@@ -210,6 +214,9 @@ parse_args() {
     if [ "$TRIALS" -lt 1 ] || [ "$TRIALS" -gt 99 ]; then err "--trials must be 1-99"; exit 2; fi
     if ! awk -v s="$TRIAL_SECS" 'BEGIN{exit !(s ~ /^[0-9]*\.?[0-9]+$/ && s+0 >= 0.1 && s+0 <= 60)}'; then
         err "--seconds must be a number from 0.1 to 60"; exit 2
+    fi
+    if ! awk -v s="$CPU_SECS" 'BEGIN{exit !(s ~ /^[0-9]*\.?[0-9]+$/ && s+0 >= 1 && s+0 <= 600)}'; then
+        err "--cpu-seconds must be a number from 1 to 600"; exit 2
     fi
     case "$MEM_METHOD" in auto|dd|tmpfs|awk|powershell) ;; *)
         err "--mem-method must be auto, dd, tmpfs, awk or powershell"; exit 2 ;;
@@ -384,8 +391,6 @@ print_system_info() {
     printf '  %-12s %s\n' "Bash:" "$BASH_VERSION"
     printf '  %-12s %s | %s\n' "Tools:" "$AWK_FLAVOR" "$DD_FLAVOR"
     printf '  %-12s %s\n' "Clock:" "$CLOCK"
-    printf '  %-12s %s trials x ~%ss per test\n' "Plan:" "$TRIALS" "$TRIAL_SECS"
-    [ -n "$LOAD1" ] && printf '  %-12s %s\n' "Load (1m):" "$LOAD1"
 
     if [ -n "$LOAD1" ] && awk -v l="$LOAD1" -v c="$CORES" 'BEGIN{exit !(l > c*0.3 + 0.5)}'; then
         warn "The machine is already busy (load $LOAD1). Results will be lower and noisier."
@@ -542,16 +547,29 @@ SINGLE=0 SINGLE_SP=0 MULTI=0 MULTI_SP=0 SCALING=0
 
 cpu_tests() {
     section "CPU"
-    printf '  %-28s ' "Single-core (bash int ops)"
-    if ! run_bench u_cpu 2000; then printf '\n'; err "Single-core test failed"; return 1; fi
+    # Each CPU test is a sustained load of CPU_SECS, split into TRIALS trials.
+    local mem_trial_us=$TRIAL_US
+    TRIAL_US=$(awk -v s="$CPU_SECS" -v t="$TRIALS" 'BEGIN{printf "%d", s*1000000/t}')
+    if [ "$CLOCK" = "date-s" ] && [ "$TRIAL_US" -lt 10000000 ]; then TRIAL_US=10000000; fi
+    printf '  %-28s ' "Single-core (${CPU_SECS}s sustained)"
+    if ! run_bench u_cpu 2000; then printf '\n'; err "Single-core test failed"; TRIAL_US=$mem_trial_us; return 1; fi
+    TRIAL_US=$mem_trial_us
     stats "$RATES"; SINGLE=$ST_MED; SINGLE_SP=$ST_SPREAD
     printf ' %s%s%s ops/s %s\n' "$C_B" "$(fmt_int "$SINGLE")" "$C_RST" "$(noise_tag "$SINGLE_SP")"
 
-    printf '  %-28s ' "Multi-core  ($CORES workers)"
-    # Short warmup so every core has ramped its clock before timing.
-    u_cpu_multi $((BENCH_N / 8 + 1)) >/dev/null 2>&1
+    printf '  %-28s ' "Multi-core  (${CPU_SECS}s, $CORES workers)"
+    # Short warmup so every core has ramped its clock, and re-size the work
+    # from it: with SMT or a busy host each worker runs slower than one core
+    # alone, and every trial should still last CPU_SECS / TRIALS.
+    local mn=$((BENCH_N / 8 + 1))
+    if u_cpu_multi "$mn" >/dev/null 2>&1; then
+        mn=$(awk -v w="$_WORK" -v c="$CORES" -v s="$CPU_SECS" -v t="$TRIALS" \
+            'BEGIN{x = int(w / c * s / t + 0.5); if (x < 1) x = 1; printf "%d", x}')
+    else
+        mn=$BENCH_N
+    fi
     dots
-    if ! run_fixed u_cpu_multi "$BENCH_N"; then printf '\n'; err "Multi-core test failed"; return 1; fi
+    if ! run_fixed u_cpu_multi "$mn"; then printf '\n'; err "Multi-core test failed"; return 1; fi
     stats "$RATES"; MULTI=$ST_MED; MULTI_SP=$ST_SPREAD
     printf ' %s%s%s ops/s %s\n' "$C_B" "$(fmt_int "$MULTI")" "$C_RST" "$(noise_tag "$MULTI_SP")"
 
@@ -717,6 +735,84 @@ mem_try_powershell() {
     return 0
 }
 
+# ---- all-cores memory: one fill per core at once, rates summed --------------
+# Runs the same unit as the single-core method (dd or awk), one copy per core,
+# behind a start barrier; each copy times itself. This is the total bandwidth
+# the memory system can deliver, which one core alone can't reach.
+MEMALL_RATE=0 MEMALL_SP=0 MEMALL_WORKERS=0 MEMALL_FN="" MEMALL_NOTE="" _MAXEL=0
+
+u_mem_all() {
+    local n=$1 i=0 go="$TMPD/mgo"
+    rm -f "$go" "$TMPD"/m.*
+    while [ "$i" -lt "$MEMALL_WORKERS" ]; do
+        (
+            while [ ! -f "$go" ]; do sleep "$POLL" 2>/dev/null || sleep 1; done
+            if "$MEMALL_FN" "$n" && [ "$_ELAPSED_US" -gt 0 ]; then
+                echo "$_WORK $_ELAPSED_US" > "$TMPD/m.$i"
+            fi
+            exit 0
+        ) &
+        i=$((i + 1))
+    done
+    : > "$go"
+    wait
+    local out
+    out=$(cat "$TMPD"/m.* 2>/dev/null | awk -v c="$MEMALL_WORKERS" '
+        $2 > 0 { r += $1 * 1000000 / $2; k++; if ($2 > mx) mx = $2 }
+        END { if (k == c) printf "%.0f %d", r, mx; else print "0 0" }')
+    # shellcheck disable=SC2086
+    set -- $out
+    _WORK=$1 _MAXEL=$2 _ELAPSED_US=1000000
+    [ "$_WORK" != 0 ]
+}
+
+mem_all_cores() {
+    MEMALL_NOTE=""
+    case "$MEM_USED" in
+        dd)  MEMALL_FN=u_mem_dd ;;
+        awk) MEMALL_FN=u_mem_awk ;;
+        *)   MEMALL_NOTE="not available with the $MEM_USED method"; return 1 ;;
+    esac
+    # Keep every worker's buffer in check: all of them together get at most
+    # a quarter of RAM. Big machines use 64 MiB dd blocks (still far larger
+    # than any CPU cache) and, if needed, fewer workers.
+    local per_mb=256 cap
+    if [ "$MEM_USED" = dd ]; then
+        if [ "$MEM_TOTAL_MB" -gt 0 ] && [ $((CORES * MEM_BS / 1048576)) -gt $((MEM_TOTAL_MB / 4)) ]; then
+            MEM_BS=67108864
+        fi
+        per_mb=$((MEM_BS / 1048576))
+    else
+        per_mb=128
+    fi
+    MEMALL_WORKERS=$CORES
+    if [ "$MEM_TOTAL_MB" -gt 0 ]; then
+        cap=$((MEM_TOTAL_MB / 4 / per_mb))
+        [ "$cap" -lt 1 ] && cap=1
+        [ "$MEMALL_WORKERS" -gt "$cap" ] && MEMALL_WORKERS=$cap
+    fi
+    printf '  %-28s ' "All cores (${MEMALL_WORKERS} workers)"
+    # Warmup that also sizes the work: under contention each worker is slower
+    # than one alone, and a trial should still last TRIAL_SECS.
+    local n=1
+    if ! u_mem_all "$n"; then
+        printf 'failed\n'; MEMALL_NOTE="workers failed"; return 1
+    fi
+    if [ "$_MAXEL" -gt 0 ]; then
+        n=$(awk -v n="$n" -v e="$_MAXEL" -v t="$TRIAL_US" 'BEGIN{x = int(n * t / e + 0.5); if (x < 1) x = 1; printf "%d", x}')
+    fi
+    dots
+    if ! run_fixed u_mem_all "$n"; then
+        printf ' failed\n'; MEMALL_NOTE="workers failed"; return 1
+    fi
+    stats "$RATES"
+    MEMALL_RATE=$(awk -v r="$ST_MED" 'BEGIN{printf "%.1f", r/1048576}')
+    MEMALL_SP=$ST_SPREAD
+    printf ' %s%s%s MiB/s %s\n' "$C_B" "$(fmt_int "$MEMALL_RATE")" "$C_RST" "$(noise_tag "$MEMALL_SP")"
+    printf '  %-28s  %sx one core\n' "Memory scaling" \
+        "$(awk -v a="$MEMALL_RATE" -v b="$MEM_RATE" 'BEGIN{printf "%.2f", (b > 0) ? a / b : 0}')"
+}
+
 mem_tests() {
     section "MEMORY"
     local order m mibs
@@ -738,6 +834,7 @@ mem_tests() {
             MEM_LOG="$MEM_LOG $m:ok"
             printf ' %s%s%s MiB/s %s\n' "$C_B" "$(fmt_int "$MEM_RATE")" "$C_RST" "$(noise_tag "$MEM_SP")"
             printf '  %-28s  %s\n' "Method" "$MEM_DESC"
+            mem_all_cores || printf '  %-28s  %sn/a (%s)%s\n' "All cores" "$C_GRY" "$MEMALL_NOTE" "$C_RST"
             return 0
         fi
         MEM_LOG="$MEM_LOG $m:implausible(${mibs}MiB/s)"
@@ -769,13 +866,13 @@ legacy_worker() {
 
 legacy_tests() {
     [ "$LEGACY" -eq 1 ] || return 0
-    section "LEGACY (v1 scale)"
+    section "CLASSIC SCORES"
     if [ "$DATE_NS_OK" -ne 1 ]; then
-        LEG_NOTE="needs GNU date +%N, like v1"
-        warn "Skipped: $LEG_NOTE (v1 itself can't run here)"
+        LEG_NOTE="needs GNU date with %N support"
+        warn "Skipped: $LEG_NOTE"
         return 0
     fi
-    printf '  %-28s ' "v1 CPU loop (${LEGACY_SECS}s)"
+    printf '  %-28s ' "CPU loop (${LEGACY_SECS}s)"
     local i=0 total=0 c
     while [ "$i" -lt "$CORES" ]; do
         legacy_worker "$LEGACY_SECS" > "$TMPD/leg.$i" &
@@ -789,9 +886,9 @@ legacy_tests() {
         i=$((i + 1))
     done
     LEG_CPU=$(awk -v t="$total" -v s="$LEGACY_SECS" 'BEGIN{printf "%.2f", t*60/s/1000}')
-    printf ' CPU Score %s%s%s\n' "$C_B" "$LEG_CPU" "$C_RST"
+    printf ' Classic CPU Score %s%s%s\n' "$C_B" "$LEG_CPU" "$C_RST"
 
-    printf '  %-28s ' "v1 simple mem (5s)"
+    printf '  %-28s ' "Memory loop (5s)"
     if ! dd if=/dev/zero of="$TMPD/fdtest" bs=1 count=1 conv=fdatasync 2>/dev/null; then
         LEG_NOTE="dd lacks conv=fdatasync"
         printf 'skipped (%s)\n' "$LEG_NOTE"
@@ -806,13 +903,13 @@ legacy_tests() {
     done
     rm -f "$f"
     LEG_MEM=$(awk -v b="$bytes" 'BEGIN{printf "%.2f", b/1048576/5/1000*100}')
-    printf ' Memory Score %s%s%s\n' "$C_B" "$LEG_MEM" "$C_RST"
+    printf ' Classic Memory Score %s%s%s\n' "$C_B" "$LEG_MEM" "$C_RST"
 }
 
 # =============================================================================
 #  Scores, dashboard, files
 # =============================================================================
-SC_SINGLE="" SC_MULTI="" SC_MEM="" SC_ALL=""
+SC_SINGLE="" SC_MULTI="" SC_MEM="" SC_MEMALL="" SC_CPU="" SC_MEMFINAL="" SC_ALL=""
 
 score_of() {   # score_of VALUE REF -> 1000 * value/ref, or empty
     [ -n "$2" ] || return 0
@@ -827,17 +924,34 @@ calc_scores() {
         local ref
         eval "ref=\${REF_MEM_$MEM_USED:-}"
         SC_MEM=$(score_of "$MEM_RATE" "$ref")
+        if [ "$MEMALL_RATE" != 0 ]; then
+            eval "ref=\${REF_MEMALL_$MEM_USED:-}"
+            SC_MEMALL=$(score_of "$MEMALL_RATE" "$ref")
+        fi
     fi
-    SC_ALL=$(awk -v a="$SC_SINGLE" -v b="$SC_MULTI" -v c="$SC_MEM" 'BEGIN{
+    # CPU score    = geometric mean of single-core and multi-core.
+    # Memory score = all-cores memory (total bandwidth), or the single-core
+    #                memory score when the method can't run on all cores.
+    # ULT score    = geometric mean of CPU and Memory, so they weigh the same.
+    SC_CPU=$(gmean "$SC_SINGLE" "$SC_MULTI")
+    SC_MEMFINAL=${SC_MEMALL:-$SC_MEM}
+    SC_ALL=""
+    # Only a full result gets a ULT score, so a failed test can't flatter it.
+    if [ -n "$SC_CPU" ] && [ -n "$SC_MEMFINAL" ]; then SC_ALL=$(gmean "$SC_CPU" "$SC_MEMFINAL"); fi
+}
+
+gmean() {   # geometric mean of the non-empty arguments (arithmetic if awk lacks log)
+    local r
+    r=$(awk -v a="${1:-}" -v b="${2:-}" 'BEGIN{
         n = 0; s = 0
         if (a > 0) { s += log(a); n++ }
         if (b > 0) { s += log(b); n++ }
-        if (c > 0) { s += log(c); n++ }
         if (n) printf "%.0f", exp(s / n) }' 2>/dev/null)
-    if [ -z "$SC_ALL" ]; then   # awk built without log/exp (some BusyBox builds)
-        SC_ALL=$(awk -v a="$SC_SINGLE" -v b="$SC_MULTI" -v c="$SC_MEM" 'BEGIN{
-            n = (a > 0) + (b > 0) + (c > 0); if (n) printf "%.0f", (a + b + c) / n }')
+    if [ -z "$r" ]; then
+        r=$(awk -v a="${1:-}" -v b="${2:-}" 'BEGIN{
+            n = (a > 0) + (b > 0); if (n) printf "%.0f", ((a > 0 ? a : 0) + (b > 0 ? b : 0)) / n }')
     fi
+    printf '%s' "$r"
 }
 
 bar() {   # bar SCORE -> 30-char bar, full at 2000
@@ -864,14 +978,20 @@ print_dashboard() {
     printf '  %-26s %15s%%\n' "CPU scaling" "$SCALING"
     if [ "$MEM_USED" != none ]; then
         printf '  %-26s %16s MiB/s  %s\n' "Memory ($MEM_USED)" "$(fmt_int "$MEM_RATE")" "$(noise_tag "$MEM_SP")"
+        if [ "$MEMALL_RATE" != 0 ]; then
+            printf '  %-26s %16s MiB/s  %s\n' "Memory all-cores" "$(fmt_int "$MEMALL_RATE")" "$(noise_tag "$MEMALL_SP")"
+        fi
     else
         printf '  %-26s %16s\n' "Memory" "FAILED"
     fi
     printf '\n  %sScores (1000 = reference 4-vCPU Xeon cloud VM; higher is better)%s\n' "$C_DIM" "$C_RST"
     score_row "Single-core" "$SC_SINGLE"
     score_row "Multi-core" "$SC_MULTI"
-    score_row "Memory" "$SC_MEM"
+    score_row "Memory 1-core" "$SC_MEM"
+    score_row "Memory all" "$SC_MEMALL"
     printf '  %s\n' "$(printf '%*s' 52 '' | tr ' ' '-')"
+    score_row "CPU" "$SC_CPU"
+    score_row "Memory" "$SC_MEMFINAL"
     if [ -n "$SC_ALL" ]; then
         printf '  %s%s%-14s%s %s %s%s%6s%s\n' "$C_B" "$C_MAG" "ULT SCORE" "$C_RST" "$(bar "$SC_ALL")" "$C_B" "$C_YEL" "$SC_ALL" "$C_RST"
     fi
@@ -879,11 +999,11 @@ print_dashboard() {
         printf '  %sMemory score: no reference for the PowerShell method yet; MiB/s is still valid.%s\n' "$C_GRY" "$C_RST"
     fi
     if [ -n "$LEG_CPU$LEG_MEM" ]; then
-        printf '\n  %sv1-compatible (compare with old minibench.sh runs; NOT the same units as above)%s\n' "$C_DIM" "$C_RST"
-        printf '  %-26s %s\n' "v1 CPU Score" "${LEG_CPU:-n/a}"
-        printf '  %-26s %s\n' "v1 Memory Score" "${LEG_MEM:-n/a}"
+        printf '\n'
+        printf '  %-26s %s\n' "Classic CPU Score" "${LEG_CPU:-n/a}"
+        printf '  %-26s %s\n' "Classic Memory Score" "${LEG_MEM:-n/a}"
     fi
-    if awk -v a="$SINGLE_SP" -v b="$MULTI_SP" -v c="$MEM_SP" 'BEGIN{exit !(a > 10 || b > 10 || c > 10)}'; then
+    if awk -v a="$SINGLE_SP" -v b="$MULTI_SP" -v c="$MEM_SP" -v d="$MEMALL_SP" 'BEGIN{exit !(a > 10 || b > 10 || c > 10 || d > 10)}'; then
         printf '\n'
         warn "Some results varied more than 10% between trials. Close other apps, plug in power,"
         warn "and try --thorough for steadier numbers."
@@ -891,53 +1011,25 @@ print_dashboard() {
 }
 
 write_results() {
-    local now out="$RESULT_FILE" dir
-    now=$(date '+%Y-%m-%d %H:%M:%S %z' 2>/dev/null)
-    dir=$(dirname "$out")
-    if [ ! -w "$dir" ]; then out="${TMPDIR:-/tmp}/$(basename "$out")"; fi
+    local out="$RESULT_FILE"
+    if [ ! -w "$(dirname "$out")" ]; then out="${TMPDIR:-/tmp}/$(basename "$out")"; fi
+    # Short, plain file for handing to someone else: three speeds, three scores.
+    local mem_speed=$MEM_RATE
+    [ "$MEMALL_RATE" != 0 ] && mem_speed=$MEMALL_RATE
     {
-        echo "benchy_version=$BENCHY_VERSION"
-        echo "date=$now"
-        echo "host=$HOST"
-        echo "os=$OS_PRETTY"
-        echo "arch=$ARCH"
-        echo "cpu=$CPU_MODEL"
-        echo "cores=$CORES"
-        echo "mem_total_mb=$MEM_TOTAL_MB"
-        echo "bash=$BASH_VERSION"
-        echo "awk=$AWK_FLAVOR"
-        echo "clock=$CLOCK"
-        echo "trials=$TRIALS"
-        echo "trial_secs=$TRIAL_SECS"
-        echo "cpu_single_ops_per_sec=$(awk -v x="$SINGLE" 'BEGIN{printf "%.0f", x}')"
-        echo "cpu_single_spread_pct=$SINGLE_SP"
-        echo "cpu_multi_ops_per_sec=$(awk -v x="$MULTI" 'BEGIN{printf "%.0f", x}')"
-        echo "cpu_multi_spread_pct=$MULTI_SP"
-        echo "cpu_scaling_pct=$SCALING"
-        echo "mem_method=$MEM_USED"
-        echo "mem_method_detail=$MEM_DESC"
-        echo "mem_mib_per_sec=$MEM_RATE"
-        echo "mem_spread_pct=$MEM_SP"
-        echo "mem_attempts=${MEM_LOG# }"
-        echo "score_single=$SC_SINGLE"
-        echo "score_multi=$SC_MULTI"
-        echo "score_mem=$SC_MEM"
-        echo "score_ult=$SC_ALL"
-        echo "v1_cpu_score=$LEG_CPU"
-        echo "v1_mem_score=$LEG_MEM"
+        echo "Benchy Ult v$BENCHY_VERSION"
+        echo "================="
+        printf 'Single-core: %.0f ops/sec\n' "$SINGLE"
+        printf 'Multi-core: %.0f ops/sec\n' "$MULTI"
+        if [ "$MEM_USED" != none ]; then
+            printf 'Memory: %.0f MiB/sec\n' "$mem_speed"
+        else
+            echo "Memory: N/A"
+        fi
+        echo "CPU-score: ${SC_CPU:-N/A}"
+        echo "Memory-score: ${SC_MEMFINAL:-N/A}"
+        echo "Ult-score: ${SC_ALL:-N/A}"
     } > "$out" 2>/dev/null && ok "Results saved to $out"
-
-    [ "$WRITE_HISTORY" -eq 1 ] || return 0
-    local h="$HISTORY_FILE"
-    [ -w "$(dirname "$h")" ] || return 0
-    if [ ! -f "$h" ]; then
-        echo "date,host,os,cpu,cores,bash,single_ops,multi_ops,mem_method,mem_mibs,score_single,score_multi,score_mem,score_ult,v1_cpu,v1_mem" > "$h"
-    fi
-    printf '%s,%s,"%s","%s",%s,%s,%.0f,%.0f,%s,%s,%s,%s,%s,%s,%s,%s\n' \
-        "$now" "$HOST" "$OS_PRETTY" "$CPU_MODEL" "$CORES" "$BASH_VERSION" \
-        "$SINGLE" "$MULTI" "$MEM_USED" "$MEM_RATE" \
-        "$SC_SINGLE" "$SC_MULTI" "$SC_MEM" "$SC_ALL" "$LEG_CPU" "$LEG_MEM" >> "$h" 2>/dev/null \
-        && ok "Run appended to $h"
 }
 
 # =============================================================================

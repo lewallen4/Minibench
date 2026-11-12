@@ -3,14 +3,16 @@
 One script, any machine with bash, numbers you can compare.
 
 ```
-bash v2/benchy-ult.sh            # ~45 s: 5 trials x 2 s per test
-bash v2/benchy-ult.sh --quick    # ~15 s
-bash v2/benchy-ult.sh --thorough # ~2-3 min, steadiest numbers
+bash v2/benchy-ult.sh            # ~85 s: 30 s sustained per CPU test
+bash v2/benchy-ult.sh --quick    # ~15 s: 5 s CPU tests
+bash v2/benchy-ult.sh --thorough # ~3 min: 60 s CPU tests
+bash v2/benchy-ult.sh -c 45      # any CPU test length you like
 bash v2/benchy-ult.sh -h         # every option
 ```
 
-The v1 script (`minibench.sh`) is untouched. Benchy Ult also prints v1-scale
-scores so old results stay comparable.
+The v1 script (`minibench.sh`) is untouched. The terminal output also shows
+"classic" CPU and Memory scores on v1's scale, so old results stay
+comparable.
 
 ## What changed from v1
 
@@ -19,23 +21,41 @@ scores so old results stay comparable.
 | CPU units | Loop passes per **60 s**, labelled "ops/sec" | Real ops per second |
 | What the CPU test measured | Mostly how fast the OS can fork `date` (one fork per loop pass) | bash integer math; the clock is read only at the start and end of a trial |
 | Timing | `date +%s%N` (GNU only, breaks on macOS) | `$EPOCHREALTIME` (no fork), then GNU date, perl, python3, 1 s clock |
-| Repeatability | One 60 s run per test | Calibrated warmup, then N trials; median and spread reported, noisy runs flagged |
+| Repeatability | One 60 s run per test | Calibrated warmup, then a 30 s sustained load per CPU test split into 5 trials; median and spread reported, noisy runs flagged |
 | Multi-core | Wall time of the slowest worker | Start barrier, each worker times itself, rates summed |
 | Memory | Writes a file of 45% of RAM to `/dev/shm` | 256 MiB in-RAM fill; no huge allocations, no disk |
 | Memory fallbacks | Retry the same method with smaller sizes | Four different methods, each result sanity-checked |
 | Windows | `/dev/shm` is on disk, results swing (see below) | dd fill, then awk, then a PowerShell/.NET test only for Windows |
-| Output | Fixed text | Colour gradient banner (plain when piped, `NO_COLOR`, or `--no-color`), score bars, results file + CSV history |
+| Output | Fixed text | Colour gradient banner (plain when piped, `NO_COLOR`, or `--no-color`), score bars, a short results file |
 | Errors | `set -e` + ERR trap kills the run on the first odd exit code | Every step checked; one failed test doesn't stop the others; temp files always cleaned up |
 
 ## Scores
 
 `1000` = the reference machine (4 vCPU Xeon cloud VM, bash 5.2). Twice as
-fast scores 2000. The ULT SCORE is the geometric mean of single-core,
-multi-core and memory.
+fast scores 2000.
+
+* **CPU score**: geometric mean of the single-core and multi-core scores.
+* **Memory score**: the all-cores memory test (total bandwidth). If the
+  method in use can't run on all cores, the single-core memory score.
+* **ULT score**: geometric mean of the CPU and Memory scores, so both weigh
+  the same. Only shown when both tests worked.
 
 The CPU test runs in bash, so the bash build matters a little (macOS ships
 bash 3.2). The tools line in the output records bash/awk/dd versions for
 that reason. Memory scores are per method: compare `dd` runs with `dd` runs.
+
+The classic scores (v1's scale) are in the terminal only. They aren't used
+for the results file because v1's CPU loop mostly measures process start-up
+speed, and its memory loop writes to disk on Windows.
+
+## All-cores memory
+
+After the single-core memory test, the same fill runs once per core at the
+same time, and the rates are summed. That's the total bandwidth the memory
+system can deliver, which one core alone can't reach (on the reference VM:
+~7 GB/s from one core, ~23 GB/s from all four). It runs with the dd and awk
+methods; with tmpfs or PowerShell it shows n/a. All workers together are kept
+to a quarter of RAM, using 64 MiB blocks or fewer workers on big machines.
 
 ## Memory cascade
 
@@ -92,17 +112,50 @@ it depends on how Git Bash/MSYS2/Cygwin behave and wasn't run on Windows.
 Benchy Ult avoids all of these: no `/dev/shm` on Windows, no file bigger than
 256 MiB, no `/proc/meminfo` dependency, and a timed fixed amount of work.
 
-## Files written
+## Results file
 
-* `benchy_ult_results.txt`: key=value results of the last run (`-o FILE` to change).
-* `benchy_ult_history.csv`: one row per run, for comparing machines (`--no-history` to skip).
+`benchy_ult_results.txt` (`-o FILE` to change) is short on purpose, so an
+engineer can run the benchmark and hand the file to anyone:
+
+```
+Benchy Ult v2.2.0
+=================
+Single-core: 533814 ops/sec
+Multi-core: 2244527 ops/sec
+Memory: 22870 MiB/sec
+CPU-score: 1005
+Memory-score: 986
+Ult-score: 995
+```
+
+`Memory` is the all-cores figure. The terminal output keeps the full detail
+(spread per test, single-core memory, method used, classic scores).
+
+## How accurate is the memory number?
+
+Checked on the Linux reference VM; Windows notes are from how Git Bash works.
+
+* **dd (the usual method)** measures how fast one core can fill RAM.
+  Verified on Linux: 1 MiB blocks stay in CPU cache (54 GB/s), 64 MiB and up
+  level off at ~7 GB/s, so 256 MiB blocks do hit RAM. The result was within
+  ~15% of a native C `memset` on the same machine.
+* **One core is not the whole memory system.** Verified: four dd fills in
+  parallel moved ~23-25 GB/s in total on the same VM. That's what the
+  all-cores test reports, and it's the better number for comparing machines,
+  Linux against Windows included.
+* **On Windows** Git Bash's runtime fills the buffer itself instead of the
+  kernel, and nothing touches the disk (inferred from the MSYS2/Cygwin design).
+  So Linux and Windows dd numbers measure the same thing and are roughly
+  comparable, but not exact: the fill code differs between the two.
+* **tmpfs, awk and PowerShell** measure different things (page-cache writes,
+  awk's string copies, .NET buffer copies), so only compare runs that used
+  the same method. The results file names the method.
 
 ## Tested
 
 * Linux (Ubuntu 24.04, bash 5.2): every memory method, every clock source,
   gawk, mawk, one-true-awk and BusyBox awk/dd, `sh` re-exec, `NO_COLOR`,
   piped output, `shellcheck` clean.
-* Windows paths: simulated (fake `uname` and `powershell.exe`) to check the
-  cascade and the exact PowerShell command line. Not yet run on a real
-  Windows machine.
+* Windows: v2.0.0 run by Skye on Windows, RAM test worked. The PowerShell
+  fallback has only been tested in simulation.
 * macOS: written for bash 3.2 and BSD tools, not yet run on a Mac.
